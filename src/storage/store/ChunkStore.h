@@ -22,6 +22,7 @@ enum class PointQueryStrategy {
   MODERN,
 };
 
+/// FileStore + MetaStore, 所有的 Stores.
 class ChunkStore {
  public:
   class Config : public ConfigBase<Config> {
@@ -35,6 +36,7 @@ class ChunkStore {
     CONFIG_HOT_UPDATED_ITEM(point_query_strategy, PointQueryStrategy::NONE);
   };
 
+  // ChunkId -> ChunkInfo 的 concurrentHashMap
   using Map = folly::ConcurrentHashMap<ChunkId, ChunkInfo>;
 
   ChunkStore(const Config &config, GlobalFileStore &globalFileStore)
@@ -57,6 +59,8 @@ class ChunkStore {
   Result<Void> migrate(const PhysicalConfig &config) { return metaStore_.migrate(config_.kv_store(), config); }
 
   // get meta of a chunk file.
+  //
+  // 查询 ChunkId 对应的 ChunkInfo.
   Result<Map::ConstIterator> get(const ChunkId &chunkId);
 
   // create a new chunk file.
@@ -79,6 +83,8 @@ class ChunkStore {
   Result<Void> sync() { return metaStore_.sync(); }
 
   // query chunks: the chunk ids in result are in reverse lexicographical order
+  //
+  // 查询范围内所有的 Chunks.
   Result<std::vector<std::pair<ChunkId, ChunkMetadata>>> queryChunks(const ChunkIdRange &chunkIdRange);
 
   // list all chunk ids.

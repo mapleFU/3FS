@@ -79,6 +79,7 @@ Result<Void> StorageOperator::stopAndJoin() {
   return Void{};
 }
 
+/// 具体的 BatchRead 实现
 CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &requestCtx,
                                                    const BatchReadReq &req,
                                                    serde::CallContext &ctx) {
@@ -115,6 +116,7 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
       XLOG(ERR, msg);
       co_return makeError(StorageCode::kTargetStateInvalid, std::move(msg));
     }
+    // 定下对应的 StorageTarget.
     it->state().storageTarget = target->storageTarget.get();
     totalLength += it->readIO().length;
     totalHeadLength += it->state().headLength;
@@ -137,6 +139,7 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
   prepareTargetRecordGuard.report(true);
 
   auto prepareBufferRecordGuard = storageReadPrepareBuffer.record();
+  // 从 rdmapool 分配 read memory
   auto buffer = components_.rdmabufPool.get();
   for (AioReadJobIterator it(&batch); it; it++) {
     auto &job = *it;
@@ -149,6 +152,7 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
       XLOG(ERR, msg);
       co_return makeError(RPCCode::kRDMANoBuf, std::move(msg));
     }
+    // 设置 io read buf 的状态(我也不知道这个 bufferIndex 干屁的)
     job.state().localbuf = std::move(*allocateResult);
     job.state().bufferIndex = buffer.index();
   }
@@ -163,6 +167,9 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
     auto recordGuard = storageAioEnqueueRecorder.record();
     auto splitSize = config_.batch_read_job_split_size();
     for (uint32_t start = 0; start < batchSize; start += splitSize) {
+      // Enqueue 到 aioReadWorker 中, 以 batchSize 为单元来给
+      //
+      // TODO(xuwei.fu): 这个 batchSize 影响什么了
       co_await components_.aioReadWorker.enqueue(AioReadJobIterator(&batch, start, splitSize));
     }
     recordGuard.report(true);
@@ -170,6 +177,7 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
 
   auto waitAioAndPostRecordGuard = storageWaitAioAndPostRecorder.record();
   auto waitAioRecordGuard = storageWaitAioRecorder.record();
+  // 等待 batch complete.
   co_await batch.complete();
   waitAioRecordGuard.report(true);
 
@@ -363,6 +371,7 @@ CoTask<IOResult> StorageOperator::handleUpdate(ServiceRequestContext &requestCtx
   // 2. lock chunk.
   folly::coro::Baton baton;
   auto recordGuard = waitChunkLockRecorder.record();
+  // 锁定单个 chunk 的更新.
   auto lockGuard = target->storageTarget->lockChunk(baton, req.payload.key.chunkId, fmt::to_string(req.tag));
   if (!lockGuard.locked()) {
     XLOGF(DBG1,
@@ -524,6 +533,7 @@ CoTask<IOResult> StorageOperator::doUpdate(ServiceRequestContext &requestCtx,
                                            ChunkEngineUpdateJob &chunkEngineJob,
                                            bool allowToAllocate) {
   auto recordGuard = storageDoUpdateRecorder.record();
+  // 把写入操作封装成一个 UpdateJob.
   UpdateJob job(requestCtx, updateIO, updateOptions, chunkEngineJob, target, allowToAllocate);
 
   if (BITFLAGS_CONTAIN(featureFlags, FeatureFlags::SEND_DATA_INLINE)) {

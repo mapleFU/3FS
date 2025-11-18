@@ -71,6 +71,7 @@ enum class ChecksumType : uint8_t {
 
 enum class FeatureFlags : uint32_t {
   DEFAULT = 0,
+  // TODO(xuwei.fu): 你这是干嘛的
   BYPASS_DISKIO = 1,
   BYPASS_RDMAXMIT = 2,
   SEND_DATA_INLINE = 4,
@@ -267,6 +268,7 @@ struct GlobalKey {
 };
 static_assert(serde::Serializable<GlobalKey>);
 
+/// 更新的一个 (id, seq_num) pair.
 struct UpdateChannel {
   SERDE_STRUCT_FIELD(id, ChannelId{});
   SERDE_STRUCT_FIELD(seqnum, ChannelSeqNum{});
@@ -306,6 +308,9 @@ struct DebugFlags {
 };
 static_assert(serde::Serializable<DebugFlags>);
 
+/// 表示一个 read io 请求.
+///
+/// TODO(xuwei.fu): Why `rdmabuf` and `key`?
 struct ReadIO {
   SERDE_STRUCT_FIELD(offset, uint32_t{});
   SERDE_STRUCT_FIELD(length, uint32_t{});
@@ -682,31 +687,36 @@ struct Successor {
 };
 
 class StorageTarget;
+
+/// Target 表示存储链上的一个实例的运行时视图，用于客户端路由与服务端链式复制：
+/// - 位置与后继：`isHead`/`isTail` 标识头尾；`successor` 提供链式复制的下游信息
+/// - 链版本：`vChainId` 携带 `(chainId, chainVer)`，用于路由与前向时的版本一致性校验
+/// - 状态：`localState`/`publicState` 分别是本地与集群公开状态；`upToDate()` 指示本地是否可服务
+/// - 资源与健康：`diskError`/`lowSpace`/`rejectCreateChunk`/`offlineUponUserRequest` 描述可用性与策略
+/// - 引用：`storageTarget` 为服务端本地对象，`weakStorageTarget` 用于生命周期检测，避免悬垂引用
 struct Target {
-  std::shared_ptr<StorageTarget> storageTarget;
-  std::weak_ptr<bool> weakStorageTarget;
-  SERDE_STRUCT_FIELD(targetId, TargetId{});
-  SERDE_STRUCT_FIELD(path, Path{});
-  SERDE_STRUCT_FIELD(diskError, false);
-  SERDE_STRUCT_FIELD(lowSpace, false);
-  SERDE_STRUCT_FIELD(rejectCreateChunk, false);
-  SERDE_STRUCT_FIELD(isHead, false);
-  SERDE_STRUCT_FIELD(isTail, false);
-  SERDE_STRUCT_FIELD(vChainId, VersionedChainId{});
-  SERDE_STRUCT_FIELD(localState, flat::LocalTargetState::INVALID);
-  SERDE_STRUCT_FIELD(publicState, flat::PublicTargetState::INVALID);
-  SERDE_STRUCT_FIELD(successor, std::optional<Successor>{});
-  SERDE_STRUCT_FIELD(diskIndex, uint32_t{});
-  SERDE_STRUCT_FIELD(chainId, ChainId{});
-  SERDE_STRUCT_FIELD(offlineUponUserRequest, false);
-  SERDE_STRUCT_FIELD(useChunkEngine, false);
+  std::shared_ptr<StorageTarget> storageTarget; // 服务端本地 StorageTarget；客户端序列化通常为空
+  std::weak_ptr<bool> weakStorageTarget; // 与 storageTarget 配套的弱引用，用于检测已释放
+  SERDE_STRUCT_FIELD(targetId, TargetId{}); // 唯一实例 ID
+  SERDE_STRUCT_FIELD(path, Path{}); // 物理路径根目录
+  SERDE_STRUCT_FIELD(diskError, false); // 磁盘错误，视为不可恢复离线
+  SERDE_STRUCT_FIELD(lowSpace, false); // 空间紧张标记
+  SERDE_STRUCT_FIELD(rejectCreateChunk, false); // 拒绝新建 chunk 的策略开关
+  SERDE_STRUCT_FIELD(isHead, false); // 是否链头：客户端更新默认发送到链头
+  SERDE_STRUCT_FIELD(isTail, false); // 是否链尾：无后继即为链尾
+  SERDE_STRUCT_FIELD(vChainId, VersionedChainId{}); // 链 ID 与版本，用于路由/前向一致性
+  SERDE_STRUCT_FIELD(localState, flat::LocalTargetState::INVALID); // 本地状态（如 UPTODATE）
+  SERDE_STRUCT_FIELD(publicState, flat::PublicTargetState::INVALID); // 集群公开状态（如 SERVING/SYNCING）
+  SERDE_STRUCT_FIELD(successor, std::optional<Successor>{}); // 后继节点信息；为空表示尾节点
+  SERDE_STRUCT_FIELD(diskIndex, uint32_t{}); // 盘序号
+  SERDE_STRUCT_FIELD(chainId, ChainId{}); // 归属链 ID（冗余于 vChainId.chainId）
+  SERDE_STRUCT_FIELD(offlineUponUserRequest, false); // 用户主动下线
+  SERDE_STRUCT_FIELD(useChunkEngine, false); // 是否启用 ChunkEngine 快路径
 
  public:
-  Result<net::Address> getSuccessorAddr() const;
-
-  bool upToDate() const { return localState == flat::LocalTargetState::UPTODATE; }
-
-  bool unrecoverableOffline() const { return diskError || offlineUponUserRequest; }
+  Result<net::Address> getSuccessorAddr() const; // 计算后继网络地址用于前向
+  bool upToDate() const { return localState == flat::LocalTargetState::UPTODATE; } // 是否本地就绪可服务
+  bool unrecoverableOffline() const { return diskError || offlineUponUserRequest; } // 不可恢复离线判定
 };
 using TargetPtr = std::shared_ptr<const Target>;
 

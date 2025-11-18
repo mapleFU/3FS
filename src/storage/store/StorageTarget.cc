@@ -289,6 +289,10 @@ Result<Void> StorageTarget::setChainId(ChainId chainId) {
 Result<Void> StorageTarget::aioPrepareRead(AioReadJob &job) {
   readCountPerDisk_->addSample(1);
   readBytesPerDisk_->addSample(job.alignedLength());
+  /// 对应数据的 aio read job.
+  ///
+  /// 无论是 ChunkEngine (拿到 Rust 写入的 offset), 还是 ChunkReplica,
+  /// 都需要设置好 chunk 的 offset 和 size.
   if (useChunkEngine()) {
     return ChunkEngine::aioPrepareRead(*engine_, job);
   } else {

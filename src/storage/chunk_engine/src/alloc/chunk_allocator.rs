@@ -45,6 +45,7 @@ impl ChunkAllocator {
         let mut allocated_count: u64 = 0;
         let mut reserved_count: u64 = 0;
 
+        // Group 存储在 RocksDB 中
         let prefix = MetaKey::group_bits_chunk_size_prefix(current);
         it.iterate(prefix, |key, value| {
             let group_id = MetaKey::parse_group_bits_key(key)?;

@@ -46,6 +46,8 @@ class ChunkEngineReadJob {
   const chunk_engine::Chunk *chunk_{};
 };
 
+/// 准备一个 aio read job. 包含:
+/// 1. readIo (包含 chunk, offset, size, etc).
 class AioReadJob {
  public:
   AioReadJob(const ReadIO &readIO, IOResult &result, BatchReadJob &batch);
@@ -67,9 +69,14 @@ class AioReadJob {
   const ReadIO &readIO_;
   IOResult &result_;
   BatchReadJob &batch_;
+  /// 具体的 read job 状态, 需要指定:
+  /// 1. localbuf (用于存储 read 结果).
+  /// 2. storageTarget (用于指定 read 目标).
+  /// 3. chunkEngineJob (用于指定 read chunk).
   struct State {
     net::RDMABuf localbuf{};
     StorageTarget *storageTarget = nullptr;
+    // 只有走到 chunkEngine 才会走到这一块的结构上
     ChunkEngineReadJob chunkEngineJob{};
     SERDE_STRUCT_FIELD(headLength, uint32_t{});
     SERDE_STRUCT_FIELD(tailLength, uint32_t{});
@@ -96,6 +103,7 @@ class BatchReadJob {
   CoTask<void> complete() { co_await baton_; }
   size_t addBufferToBatch(serde::CallContext::RDMATransmission &batch);
   size_t copyToRespBuffer(std::vector<uint8_t> &buffer);
+  /// 具体的去 finish 单个 job
   void finish(AioReadJob *job);
   auto checksumType() const { return checksumType_; }
   bool recalculateChecksum() const { return recalculateChecksum_; }
@@ -108,13 +116,16 @@ class BatchReadJob {
  private:
   friend class AioReadJobIterator;
   std::vector<AioReadJob> jobs_;
+  // 整个 job 的 baton
   folly::coro::Baton baton_;
+  // 维护的 finish job count, ready 了会通知 baton
   std::atomic<uint64_t> finishedCount_{};
   std::atomic<RelativeTime> startTime_ = RelativeTime::now();
   const ChecksumType checksumType_;
   bool recalculateChecksum_ = false;
 };
 
+/// 批量设置 AioReadJob
 class AioReadJobIterator {
  public:
   AioReadJobIterator() = default;

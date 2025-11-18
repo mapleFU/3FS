@@ -77,6 +77,7 @@ class TargetMap {
   std::vector<VersionedChainId> syncingChains_;
 };
 
+/// ChainId -> TargetId -> Target mapping.
 class AtomicallyTargetMap {
  public:
   // [observers] get a snapshot of target map.

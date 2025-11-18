@@ -6,6 +6,9 @@ use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+/// 表示一个 chunk.
+///
+/// 包含了 chunk_id, chunk_meta, allocator 等信息.
 pub struct Chunk {
     meta: ChunkMeta,
     allocator: Arc<Allocator>,

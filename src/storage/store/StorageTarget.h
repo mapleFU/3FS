@@ -17,6 +17,7 @@
 
 namespace hf3fs::storage {
 
+/// StorageTarget 属于一个 GlobalFileStore, 对应某个 chain 下的一块盘.
 class StorageTarget : public enable_shared_from_this<StorageTarget> {
  protected:
   StorageTarget(const ChunkStore::Config &config,
@@ -48,6 +49,8 @@ class StorageTarget : public enable_shared_from_this<StorageTarget> {
   Result<Void> setChainId(ChainId chainId);
 
   // get disk index.
+  //
+  // 
   uint32_t diskIndex() const { return diskIndex_; }
 
   // get target path. [guaranteed loaded]

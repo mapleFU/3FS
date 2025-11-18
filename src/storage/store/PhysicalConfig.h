@@ -20,6 +20,7 @@ class PhysicalConfig {
   SERDE_STRUCT_FIELD(physical_file_count, 256u);
   SERDE_STRUCT_FIELD(chunk_size_list, (std::vector<Size>{512_KB, 1_MB, 2_MB, 4_MB, 16_MB, 64_MB}));
   SERDE_STRUCT_FIELD(chain_id, uint32_t{});
+  // 使用的 Meta 类型.
   SERDE_STRUCT_FIELD(kv_store_type, kv::KVStore::Type::LevelDB);
   SERDE_STRUCT_FIELD(has_sentinel, false);
   SERDE_STRUCT_FIELD(kv_store_name, std::string{"meta"});

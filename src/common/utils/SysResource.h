@@ -18,7 +18,9 @@ struct SysResource {
 
   static Result<std::string> exec(std::string_view cmd);
 
+  /// DiskInfo 表示一个磁盘的信息
   struct DiskInfo {
+    // 设备 id
     SERDE_STRUCT_FIELD(deviceId, uint32_t{});
     SERDE_STRUCT_FIELD(uuid, std::string{});
     SERDE_STRUCT_FIELD(manufacturer, std::string{});

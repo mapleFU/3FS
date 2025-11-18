@@ -26,6 +26,7 @@ struct SlimChainInfo {
   std::vector<SlimTargetInfo> servingTargets;
 };
 
+/// 按照一定规则，去选择 UpdateTarget.
 enum TargetSelectionMode {
   Default = 0,
   LoadBalance,

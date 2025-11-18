@@ -21,7 +21,7 @@ class SerdeObjectReader : public BaseObjectVisitor<SerdeObjectReader<SerdeType>>
   SerdeObjectReader(parquet::StreamReader &&reader)
       : reader_(std::move(reader)) {}
 
-  static std::shared_ptr<SerdeObjectReader> open(const Path path) {
+  static std::shared_ptr<SerdeObjectReader> open(const Path& path) {
     // open file
     auto openStream = arrow::io::ReadableFile::Open(path.string());
 

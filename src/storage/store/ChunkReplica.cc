@@ -35,6 +35,8 @@ monitor::CountRecorder storageCommitStale{"storage.chunk_commit.stale"};
 }  // namespace
 
 // prepare aio read.
+//
+// 这里不会准备 rdmabuf 和 key
 Result<Void> ChunkReplica::aioPrepareRead(ChunkStore &store, AioReadJob &job) {
   auto recordGuard = storageAioReadRecorder.record();
 
@@ -90,6 +92,10 @@ Result<Void> ChunkReplica::aioFinishRead(ChunkStore &store, AioReadJob &job) {
   const ChunkMetadata &meta = chunkInfo.meta;
 
   // 2. check meta info.
+  //
+  // 这里主要是比较 MetaInfo, 来避免版本不一致的问题.
+  //
+  // ChunkEngine 则没有这个问题.
   if (UNLIKELY(result.updateVer != meta.updateVer)) {
     auto msg = fmt::format("chunk {} {} version outdated {} != {}", chunkId, meta, result.updateVer, meta.updateVer);
     XLOG(ERR, msg);
@@ -245,6 +251,7 @@ Result<uint32_t> ChunkReplica::update(ChunkStore &store, UpdateJob &job, folly::
   meta.timestamp = UtcClock::now();
   const bool isAppendWrite = writeIO.offset == meta.size;
   const bool skipPersist = (writeIO.isWrite() && isAppendWrite) || writeIO.isTruncate() || writeIO.isExtend();
+  // 是否要创建新 Chunk
   auto setResult = needCreateChunk ? store.createChunk(chunkId, chunkSize, chunkInfo, executor, job.allowToAllocate())
                                    : store.set(chunkId, chunkInfo, !skipPersist);
   if (UNLIKELY(!setResult)) {

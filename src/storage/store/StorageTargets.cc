@@ -25,6 +25,7 @@ using namespace std::chrono_literals;
 StorageTargets::~StorageTargets() { void(); }
 
 Result<Void> StorageTargets::init(CPUExecutorGroup &executor) {
+  // 拿到 DiskInfo
   auto diskInfoResult = SysResource::scanDiskInfo();
   RETURN_AND_LOG_ON_ERROR(diskInfoResult);
   std::unordered_map<uint32_t, std::string> deviceIdToManufacturer;
@@ -41,6 +42,7 @@ Result<Void> StorageTargets::init(CPUExecutorGroup &executor) {
       XLOG(ERR, msg);
       return makeError(StorageCode::kStorageStatFailed, std::move(msg));
     }
+    // 构造 deviceIdToManufacturer
     manufacturers_.push_back(deviceIdToManufacturer[st.st_dev]);
   }
 
@@ -54,6 +56,7 @@ Result<Void> StorageTargets::init(CPUExecutorGroup &executor) {
     auto engine_path = path / "engine";
     bool create = !boost::filesystem::exists(engine_path);
     create |= config_.create_engine_path();
+    // 创建 Rust Engine
     tasks.push_back(folly::coro::co_invoke([engine_path, create]() -> CoTryTask<rust::Box<chunk_engine::Engine>> {
                       std::string error;
                       auto engine = chunk_engine::create(engine_path.c_str(), create, sizeof(ChainId), error);
@@ -76,7 +79,9 @@ Result<Void> StorageTargets::init(CPUExecutorGroup &executor) {
 Result<Void> StorageTargets::create(const CreateConfig &createConfig) {
   CPUExecutorGroup executor(1, "Creator");
   RETURN_AND_LOG_ON_ERROR(init(executor));
+  // 拿到对应的 target_paths
   auto targetPaths = config_.target_paths();
+  // 每个 path 下的 Target 数量
   auto targetNumPerPath = config_.target_num_per_path();
   auto targetIdSize = createConfig.target_ids().size();
   if (targetPaths.empty()) {

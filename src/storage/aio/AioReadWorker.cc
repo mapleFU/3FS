@@ -64,6 +64,7 @@ Result<Void> AioReadWorker::run(AioStatus &aioStatus, IoUringStatus &ioUringStat
   while (true) {
     // 1. try to fetch a batch read job.
     aioRunningThreadsCount.addSample(-1);
+    // 拿到单组 Task ( 实际上是个 Aio 的 Iterator ).
     auto it = queue_.dequeue();  // waiting.
     aioRunningThreadsCount.addSample(1);
     if (it.isNull()) {
@@ -73,6 +74,7 @@ Result<Void> AioReadWorker::run(AioStatus &aioStatus, IoUringStatus &ioUringStat
     batchReadInQueueRecorder.addSample(RelativeTime::now() - it.startTime());
     it->batch().resetStartTime();
 
+    // AioStatus / IoUringStatus 设置当前的 Iterator.
     IoStatus &status = config_.useIoUring() ? static_cast<IoStatus &>(ioUringStatus) : aioStatus;
     status.setAioReadJobIterator(it);
 

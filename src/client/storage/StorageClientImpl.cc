@@ -1828,11 +1828,13 @@ CoTryTask<void> StorageClientImpl::batchWriteWithoutRetry(ClientRequestContext &
     SemaphoreGuard concurrentReq(writeConcurrencyLimit_.getConcurrencySemaphore());
     co_await concurrentReq.coWait();
 
+    // 需要根据 RouteInfo 来定位路由写什么模块.
     if (!isLatestRoutingInfo(routingInfo, batchIOs)) {
       setErrorCodeOfOps(batchIOs, StorageClientCode::kRoutingVersionMismatch);
       co_return false;
     }
 
+    // 申请操作的 Channel, 本质上是一个定序操作.
     if (!allocateChannelsForOps(chanAllocator_, batchIOs, false /*reallocate*/)) {
       XLOGF(WARN,
             "Cannot allocate channel ids for {} write IOs, first IO {}",
@@ -1945,6 +1947,7 @@ CoTryTask<void> StorageClientImpl::sendWriteRequestsSequentially(
   auto startTime = hf3fs::SteadyClock::now();
 
   for (auto &writeIO : writeIOs) {
+    // 顺序逐个发送 write-requests (应该是有任务要求?)
     co_await sendWriteRequest(requestCtx, writeIO, *nodeInfo, userInfo, options);
 
     XLOGF_IF(DFATAL,

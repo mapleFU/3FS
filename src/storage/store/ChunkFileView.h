@@ -7,6 +7,7 @@
 
 namespace hf3fs::storage {
 
+/// 包装了 ChunkFile 的读写操作.
 class ChunkFileView {
  public:
   // read a piece of data.
@@ -16,6 +17,8 @@ class ChunkFileView {
   Result<uint32_t> write(const uint8_t *buf, size_t size, size_t offset, const ChunkMetadata &meta);
 
   // calculate the chunk checksum
+  //
+  // TODO(xuwei.fu): 这个 checksum 什么地方用到呢?
   Result<ChecksumInfo> checksum(ChecksumType type, size_t size, size_t offset, const ChunkMetadata &meta);
 
   // get direct fd for aio read.

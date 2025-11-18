@@ -35,6 +35,8 @@ void AioReadJob::setResult(Result<uint32_t> lengthInfo) {
     }
 
     // check chunk version.
+
+    // 调用 finishRead 来检查版本
     auto result = state_.storageTarget->aioFinishRead(*this);
     if (UNLIKELY(!result)) {
       lengthInfo = makeError(std::move(result.error()));
@@ -59,6 +61,7 @@ void AioReadJob::setResult(Result<uint32_t> lengthInfo) {
 
   result_.lengthInfo = std::move(lengthInfo);
   state_.chunkEngineJob.reset();
+  /// 让 baton finish 一部分.
   batch_.finish(this);
 }
 

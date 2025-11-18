@@ -19,6 +19,7 @@ namespace hf3fs::storage {
 
 struct Components;
 
+/// 节点故障时候的数据同步.
 class ResyncWorker {
  public:
   enum FullSyncLevel {

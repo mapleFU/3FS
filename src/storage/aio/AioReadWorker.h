@@ -56,6 +56,7 @@ class AioReadWorker {
                    std::make_shared<folly::NamedThreadFactory>("AioRead")) {}
   ~AioReadWorker();
 
+  /// 加入写请求
   CoTask<void> enqueue(AioReadJobIterator job) { co_await queue_.co_enqueue(job); }
 
   Result<Void> start(const std::vector<int> &fds, const std::vector<struct iovec> &iovecs);
@@ -68,6 +69,8 @@ class AioReadWorker {
  private:
   ConstructLog<"storage::AioReadWorker"> constructLog_;
   const Config &config_;
+  /// 这里拿到的是 JobIterator, 生命周期绑定在外部 caller side, 
+  /// 这里相当于一个 sub-batch.
   BoundedQueue<AioReadJobIterator> queue_;
 
   folly::CPUThreadPoolExecutor executors_;

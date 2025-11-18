@@ -16,6 +16,7 @@ namespace hf3fs::storage {
 struct Components;
 class StorageOperator;
 
+/// TODO(xuwei.fu): Whats this???
 class ReliableUpdate {
  public:
   struct Config : ConfigBase<Config> {

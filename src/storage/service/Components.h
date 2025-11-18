@@ -101,6 +101,7 @@ struct Components {
   std::unique_ptr<net::Client> netClient;
   folly::atomic_shared_ptr<hf3fs::client::IMgmtdClientForServer> mgmtdClient;
   BufferPool rdmabufPool;
+  //
   AtomicallyTargetMap targetMap;
   StorageTargets storageTargets;
   AioReadWorker aioReadWorker;
@@ -111,6 +112,7 @@ struct Components {
   AllocateWorker allocateWorker;
   PunchHoleWorker punchHoleWorker;
   SyncMetaKvWorker syncMetaKvWorker;
+  // 链后面的请求
   ReliableForwarding reliableForwarding;
   DynamicCoroutinesPool readPool;
   DynamicCoroutinesPool updatePool;

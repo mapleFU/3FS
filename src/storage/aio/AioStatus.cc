@@ -35,6 +35,7 @@ void setReadJobResult(void *raw, int64_t res) {
     if (UNLIKELY(length == 0 && job->readIO().length > 0)) {
       XLOGF(WARNING, "read length is 0: {}, state: {}", job->readIO(), job->state());
     }
+    // 调用 job->setResult.
     job->setResult(length);
     // WARNING: job is no longer available.
   } else {
@@ -87,6 +88,9 @@ void AioStatus::collect() {
   auto recordGuard = ioCollectRecorder.record();
   while (availableToSubmit() && iterator_) {
     auto &job = *iterator_++;
+    // 调用 storageTarget 的 aioPrepareRead 方法, 准备好 read 操作的结构.
+    //
+    // 这里不准备任何 async io, 只是设置好 chunk 的 offset 和 size.
     auto result = job.state().storageTarget->aioPrepareRead(job);
     if (UNLIKELY(!result)) {
       job.setResult(makeError(std::move(result.error())));
@@ -99,6 +103,7 @@ void AioStatus::collect() {
     availables_.pop_back();
     auto &state = job.state();
     job.resetStartTime();
+    // 具体调用 io_prep_pread 方法
     ::io_prep_pread(iocb, state.readFd, state.localbuf.ptr(), state.readLength, state.readOffset);
     iocb->data = &job;
   }

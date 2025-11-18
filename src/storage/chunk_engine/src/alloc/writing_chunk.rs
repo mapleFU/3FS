@@ -7,6 +7,9 @@ pub struct WritingHolder {
     pub abort: bool,
 }
 
+/// 表示一个正在写入的 chunk.
+///
+/// 包含了 chunk_id, chunk, list, prefix_len, is_remove, commit_succ 等信息.
 pub type WritingList = DashMap<Bytes, HashMap<Bytes, WritingHolder>>;
 
 pub struct WritingChunk {

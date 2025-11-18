@@ -78,8 +78,10 @@ Result<Void> ChunkStore::createChunk(const ChunkId &chunkId,
                                      folly::CPUThreadPoolExecutor &executor,
                                      bool allowToAllocate) {
   auto recordGuard = chunkStoreCreateRecorder.record();
+  // 在 metaStore_ 上 createChunk
   auto metaResult = metaStore_.createChunk(chunkId, chunkInfo.meta, chunkSize, executor, allowToAllocate);
   RETURN_AND_LOG_ON_ERROR(metaResult);
+  // 在 fileStore 上申请一个新的文件, 并打开, 然后写入 `map_`.
   auto openResult = fileStore_.open(chunkInfo.meta.innerFileId);
   RETURN_AND_LOG_ON_ERROR(openResult);
   chunkInfo.view = *openResult;

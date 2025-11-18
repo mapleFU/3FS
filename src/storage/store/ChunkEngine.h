@@ -35,6 +35,7 @@ struct ChunkEngine {
     auto &state = job.state();
 
     if (!state.chunkEngineJob.has_chunk()) {
+      // 拿到 key 的 chunkId 和 chainId.
       const auto &chunkId = job.readIO().key.chunkId;
       auto chainId = job.readIO().key.vChainId.chainId;
 
