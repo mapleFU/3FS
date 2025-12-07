@@ -63,11 +63,13 @@ Result<const Target *> TargetMap::getByChainId(VersionedChainId vChainId, bool a
     XLOG(ERR, msg);
     return makeError(StorageClientCode::kRoutingVersionMismatch, std::move(msg));
   }
+  // OFFLINE 拦截：目标处于离线状态时，直接拒绝请求，避免坏盘或人工下线的实例被访问
   if (target->localState == flat::LocalTargetState::OFFLINE) {
     auto msg = fmt::format("chain {} target {} is offline", vChainId.chainId, target->targetId);
     XLOG(ERR, msg);
     return makeError(StorageCode::kTargetOffline, std::move(msg));
   }
+  // 无本地对象视为离线：防止悬空路由（可能由盘下线或生命周期释放导致）
   if (target->storageTarget == nullptr) {
     auto msg = fmt::format("chain {} target {} is offline", vChainId.chainId, target->targetId);
     XLOG(CRITICAL, msg);
@@ -303,6 +305,7 @@ Result<Void> TargetMap::offlineTarget(TargetId targetId) {
 }
 
 Result<Void> TargetMap::offlineTargets(const Path &path) {
+  // 将指定盘路径下的所有 Target 标记为不可恢复离线：diskError=true, localState=OFFLINE
   for (auto &[targetId, target] : targets_) {
     if (path == target.path.parent_path() && !target.unrecoverableOffline()) {
       target.diskError = true;
@@ -314,6 +317,7 @@ Result<Void> TargetMap::offlineTargets(const Path &path) {
 }
 
 Result<Void> TargetMap::updateDiskState(const Path &path, bool lowSpace, bool rejectCreateChunk) {
+  // 更新指定盘路径下 Target 的空间/分配策略状态：lowSpace 与 rejectCreateChunk
   for (auto &[targetId, target] : targets_) {
     if (path == target.path.parent_path() && !target.unrecoverableOffline()) {
       target.lowSpace = lowSpace;

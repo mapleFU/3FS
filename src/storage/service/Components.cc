@@ -244,13 +244,16 @@ void Components::updateHeartbeatPayload(const TargetMap &targetMap, bool offline
   for (auto &[targetId, target] : targetMap.getTargets()) {
     flat::LocalTargetInfo targetInfo;
     targetInfo.targetId = targetId;
+    // 上报本地状态：支持整体离线（offline=true）或每 Target 的当前状态
     targetInfo.localState = offline ? flat::LocalTargetState::OFFLINE : target.localState;
     targetInfo.diskIndex = target.diskIndex;
+    // 上报空间状态：用于管理端感知低空间风险并做调度
     targetInfo.lowSpace = target.lowSpace;
     monitor::TagSet tag;
     tag.addTag("instance", fmt::format("{}", targetId));
     targetStateRecorder.set(uint32_t(target.localState), tag);
     if (targetInfo.localState != flat::LocalTargetState::OFFLINE) {
+      // 仅对在线目标上报容量与链版本
       targetInfo.usedSize = target.storageTarget->usedSize();
       targetInfo.chainVersion = target.vChainId.chainVer;
     }

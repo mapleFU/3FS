@@ -244,6 +244,7 @@ Result<uint32_t> ChunkReplica::update(ChunkStore &store, UpdateJob &job, folly::
     }
   }
 
+  // 先标记 chunk 的状态是 Dirty，无论是新创建，还是用户真创建 Chunk，还是后续传播失败，这里状态都是 dirty.
   meta.chunkState = ChunkState::DIRTY;
   meta.chainVer = job.commitChainVer();
   meta.lastRequestId = job.requestCtx().tag.requestId;
@@ -298,6 +299,7 @@ Result<uint32_t> ChunkReplica::update(ChunkStore &store, UpdateJob &job, folly::
     }
   }
   if (UNLIKELY(!writeResult)) {
+    // 保持 dirty 状态退出
     return writeResult;  // chunk becomes dirty.
   }
 
@@ -308,6 +310,7 @@ Result<uint32_t> ChunkReplica::update(ChunkStore &store, UpdateJob &job, folly::
   }
 
   // 4. finish to write.
+  // 写入 CLEAN.
   meta.chunkState = ChunkState::CLEAN;
 
   XLOGF(DBG, "chunk {} {} write finish", chunkId, meta);

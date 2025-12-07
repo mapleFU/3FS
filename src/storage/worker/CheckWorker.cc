@@ -148,6 +148,7 @@ void CheckWorker::loop(const std::vector<Path> &targetPaths, const std::vector<s
     auto now = RelativeTime::now();
     auto diskLowSpaceThreshold = config_.disk_low_space_threshold();
     auto diskRejectCreateChunkThreshold = config_.disk_reject_create_chunk_threshold();
+    // 周期性巡检磁盘状态：空间/可写性/阈值触发（每 ~3s）
     if (now - lastCheckDiskStatusTime >= 3_s) {
       lastCheckDiskStatusTime = now;
       XLOGF(DBG9, "check disk status start");
@@ -155,6 +156,7 @@ void CheckWorker::loop(const std::vector<Path> &targetPaths, const std::vector<s
         auto &targetPath = targetPaths[i];
         auto &recorder = *recorders[i];
         boost::system::error_code ec{};
+        // 空间查询失败：视为盘异常，直接将该盘下所有 Target 下线
         auto spaceInfo = boost::filesystem::space(targetPath, ec);
         if (UNLIKELY(ec.failed())) {
           XLOGF(CRITICAL, "check disk failed {}, errno: {}", targetPath, ec.message());
@@ -167,6 +169,7 @@ void CheckWorker::loop(const std::vector<Path> &targetPaths, const std::vector<s
         diskUsage[i] = 1.0 - (double)spaceInfo.available / std::max(1ul, spaceInfo.capacity);
 
         auto recordGuard = recorder.check_disk.record();
+        // 可写性巡检：若盘为只读，则下线该盘下所有 Target
         bool writable = checkWritable(targetPath);
         if (!writable) {
           recorder.disk_readonly.set(1);
@@ -176,8 +179,10 @@ void CheckWorker::loop(const std::vector<Path> &targetPaths, const std::vector<s
         }
         recordGuard.report(true);
 
+        // 空间阈值：达到低空间阈值标记 lowSpace；达到更高阈值禁止新建 chunk
         bool lowSpace = diskUsage[i] >= diskLowSpaceThreshold;
         bool rejectCreateChunk = diskUsage[i] >= diskRejectCreateChunkThreshold;
+        // 引擎层禁止分配；路由层更新 Target 的 lowSpace/rejectCreateChunk 状态
         components_.storageTargets.engines()[i]->set_allow_to_allocate(!rejectCreateChunk);
         components_.targetMap.updateDiskState(targetPath, lowSpace, rejectCreateChunk);
       }

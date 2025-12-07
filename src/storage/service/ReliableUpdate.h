@@ -16,7 +16,11 @@ namespace hf3fs::storage {
 struct Components;
 class StorageOperator;
 
-/// TODO(xuwei.fu): Whats this???
+// 可靠更新协调器：
+// - 以 (ClientId, ChainId, ChannelId, seqnum) 建模更新会话，序列化同一 channel 的并发更新
+// - 去重与缓存：重复请求直接返回已缓存结果；丢回包时可拾取上一成功的 updateVer
+// - 协调执行：调用 StorageOperator 处理本地更新与链式前向；记录并缓存结果
+// - 生命周期：支持停止前拒绝新请求；定期清理已过期的客户端缓存
 class ReliableUpdate {
  public:
   struct Config : ConfigBase<Config> {
@@ -27,13 +31,16 @@ class ReliableUpdate {
       : config_(config),
         components_(components) {}
 
+  // 执行可靠更新：校验 tag/channel；获取并锁定 channel；命中缓存则返回，否则运行更新并缓存结果
   CoTask<IOResult> update(ServiceRequestContext &requestCtx,
                           UpdateReq &req,
                           net::IBSocket *ibSocket,
                           TargetPtr &target);
 
+  // 清理过期客户端：依据活跃会话列表与超时阈值，移除不活跃客户端的缓存
   Result<Void> cleanUpExpiredClients(const robin_hood::unordered_set<std::string> &activeClients);
 
+  // 停止前标记拒绝新请求
   void beforeStop() { stopped_ = true; }
 
  private:
