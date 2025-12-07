@@ -81,6 +81,7 @@ size_t BatchReadJob::addBufferToBatch(serde::CallContext::RDMATransmission &batc
     if (job.result().lengthInfo) {
       auto length = *job.result().lengthInfo;
       auto localbuf = job.state().localbuf.subrange(job.state().headLength, length);
+      // 将服务端本地缓冲窗口写入到客户端远端缓冲（`ReadIO.rdmabuf`），由 RDMA WRITE 完成传输
       auto result = batch.add(job.readIO().rdmabuf, localbuf);
       if (UNLIKELY(!result)) {
         rdmaWriteFails.addSample(1);

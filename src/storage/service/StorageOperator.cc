@@ -139,7 +139,9 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
   prepareTargetRecordGuard.report(true);
 
   auto prepareBufferRecordGuard = storageReadPrepareBuffer.record();
-  // 从 rdmapool 分配 read memory
+  // 从 RDMA 缓冲池分配服务端本地读缓冲：
+  // - AIO 阶段：通过 `aioReadWorker` 将磁盘数据读入 `state.localbuf`
+  // - 回传阶段：若开启 RDMA，使用 `ctx.writeTransmission()` 批量 RDMA WRITE 写回客户端远端缓冲
   auto buffer = components_.rdmabufPool.get();
   for (AioReadJobIterator it(&batch); it; it++) {
     auto &job = *it;
@@ -192,6 +194,7 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
 
     auto waitBatchRecordGuard = storageWaitBatchRecorder.record();
     auto writeBatch = ctx.writeTransmission();
+    // 与 RDMAControl 协调以限制并发：可在获取设备级信号量前或后调用，提升公平性与稳定性
     batch.addBufferToBatch(writeBatch);
     waitBatchRecordGuard.report(true);
 
@@ -221,6 +224,7 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
     }
 
     auto waitPostRecordGuard = storageWaitPostRecorder.record(ibdevTagSet);
+    // 提交 RDMA WRITE 批次，CQ 完成后唤醒；失败则将对应 job 标记错误
     auto postResult = FAULT_INJECTION_POINT(requestCtx.debugFlags.injectServerError(),
                                             makeError(RPCCode::kRDMAPostFailed),
                                             (co_await writeBatch.post()));
@@ -565,6 +569,9 @@ CoTask<IOResult> StorageOperator::doUpdate(ServiceRequestContext &requestCtx,
       XLOG(ERR, msg);
       co_return makeError(RPCCode::kRDMANoBuf, std::move(msg));
     }
+    // 写入（客户端->服务端）：
+    // - 服务端先为接收数据分配本地 RDMA 缓冲（`allocateResult`），导出为 `remoteBuf` 供链式复制使用
+    // - 若不绕过 RDMA 传输，则执行 RDMA READ 从客户端 `updateIO.rdmabuf` 拉取数据到本地缓冲
     job.state().data = allocateResult->ptr();
     remoteBuf = allocateResult->toRemoteBuf();
     if (!BITFLAGS_CONTAIN(featureFlags, FeatureFlags::BYPASS_RDMAXMIT)) {
@@ -591,6 +598,7 @@ CoTask<IOResult> StorageOperator::doUpdate(ServiceRequestContext &requestCtx,
       waitSemRecordGuard.report(true);
 
       auto waitPostRecordGuard = storageWriteWaitPostRecorder.record(ibdevTagSet);
+      // 提交 RDMA READ 批次，将客户端数据拉取到 `job.state().data`
       auto postResult = co_await readBatch.post();
       if (UNLIKELY(!postResult)) {
         XLOGF(ERR, "write post RDMA failed, req {}, error {}", updateIO, postResult.error());

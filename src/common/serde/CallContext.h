@@ -91,6 +91,11 @@ class CallContext {
 
   tracing::Points &tracingPoints() { return tracingPoints_; }
 
+  // RDMATransmission 描述一次“由服务端主动发起的 RDMA 传输控制”流程：
+  // - 构造：绑定 `CallContext` 与对应的 RDMA socket，选择 `READ/WRITE` 操作码
+  // - add：将客户端提供的远端缓冲 `RDMARemoteBuf` 与服务端本地缓冲 `RDMABuf` 组成一个批次
+  // - post：提交批次，CQ 完成后唤醒等待协程
+  // - applyTransmission(timeout)：通过 `RDMAControl::apply` 与中心限流器同步，控制并发与时延统计
   class RDMATransmission {
    public:
     RDMATransmission(CallContext &ctx, ibv_wr_opcode opcode)

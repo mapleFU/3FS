@@ -53,6 +53,10 @@ class IOBuffer : public folly::MoveOnly {
 
   net::RDMABuf subrange(size_t offset, size_t length) const { return rdmabuf.subrange(offset, length); }
 
+  // IOBuffer 封装了客户端已注册的 RDMA 内存：
+  // - `rdmabuf` 为已注册的本地缓冲；`data()/size()` 提供读写窗口
+  // - `contains(data,len)` 用于校验用户数据区间是否落在注册范围，避免越界
+  // - `subrange()` 用于按 IO 切分窗口，便于批量 RDMA 组织
   IOBuffer(hf3fs::net::RDMABuf rdmabuf)
       : rdmabuf(rdmabuf) {}
 
@@ -125,6 +129,9 @@ class ReadIO : public IOBase {
   friend class StorageClientInMem;
 
  public:
+  // ReadIO：客户端读操作描述
+  // - `key` 在 RPC 序列化结构中携带链与 chunk 信息；`rdmabuf` 为客户端远端缓冲，由服务端 RDMA WRITE 回填
+  // - 服务端在 AIO 完成后，将 `state.localbuf` 按窗口写入 `rdmabuf` 或选择 inline 返回
   RequestId requestId;
   std::vector<ReadIO> splittedIOs;
 };
@@ -144,6 +151,9 @@ class WriteIO : public IOBase {
         requestId(requestId) {}
 
  public:
+  // WriteIO：客户端写操作描述
+  // - `rdmabuf` 为客户端远端缓冲，服务端通过 RDMA READ 拉取数据；也可根据阈值选择 inline 发送
+  // - `checksum` 为客户端本地数据校验，服务端会与自身计算结果比对，保障数据一致性
   const ChecksumInfo &localChecksum() const { return checksum; }
 
  private:

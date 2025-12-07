@@ -37,6 +37,12 @@ namespace hf3fs::net {
 
 using RDMABufMR = ibv_mr *;
 
+// RDMARemoteBuf 封装了“远端可读/可写内存”的视图：
+// - 字段：`addr_` 为远端虚拟地址，`length_` 为剩余可传输长度；`rkeys_` 保存各 IB 设备对应的 rkey
+// - 能力：支持 `advance/subtract/subrange/first/last` 等切片与推进操作，便于批量 SGE 组织
+// - 设备选择：`getRkey(devId)` 在多设备环境下按连接所选设备取 rkey；无匹配返回 `nullopt`
+// - 用法：协议层将客户端注册的本地内存序列化为 `RDMARemoteBuf` 下发，服务端据此执行 RDMA READ/WRITE
+//   参见 `IBSocket::RDMAReqBatch::add()` 与 `CallContext::RDMATransmission`
 class RDMARemoteBuf {
   struct Rkey {
     uint32_t rkey = 0;
@@ -135,6 +141,13 @@ class RDMARemoteBuf {
 
 class RDMABufPool;
 
+// RDMABuf 封装了“本端注册的 RDMA 可访问内存”：
+// - 生命周期：内部 `Inner` 负责分配/注册内存（`allocateMemory`/`registerMemory`），并在析构归还到池
+// - 视图：`begin_/length_` 提供当前窗口；`subrange/takeFirst/takeLast` 用于切片与推进
+// - 设备绑定：`getMR(dev)` 返回指定 IB 设备的 `ibv_mr`，用于填充 SGE
+// - 远端导出：`toRemoteBuf()` 将当前窗口转为 `RDMARemoteBuf`（携带各设备 rkey），用于跨节点传递
+// - 客户端：`IOBuffer` 保存 `RDMABuf`，并将 `[data,length]` 区间限制在注册范围内，避免越界
+// - 服务器：批量读将服务端 `localbuf` 写回到客户端远端缓冲；批量写则先 RDMA READ 拉取客户端数据
 class RDMABuf {
  public:
   RDMABuf()

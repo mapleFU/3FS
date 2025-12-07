@@ -101,6 +101,10 @@ class BatchReadJob {
     jobs_.back().state().storageTarget = target;
   }
   CoTask<void> complete() { co_await baton_; }
+  // addBufferToBatch 将所有已完成的 AioReadJob 结果打包到 RDMA 写批次：
+  // - 对每个 job：取 `state.localbuf` 的有效窗口（跳过 head/tail 对齐区），写入客户端的 `ReadIO.rdmabuf`
+  // - 错误处理：若批次 add 失败（rkey/长度/设备不匹配），将该 job 标记为失败
+  // - 统计：累加提交的块数与字节数，以便监控
   size_t addBufferToBatch(serde::CallContext::RDMATransmission &batch);
   size_t copyToRespBuffer(std::vector<uint8_t> &buffer);
   /// 具体的去 finish 单个 job

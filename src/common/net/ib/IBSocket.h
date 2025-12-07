@@ -78,8 +78,18 @@ namespace net {
 class IBConnectService;
 class IBSocketManager;
 
+// IBSocket 封装了一条 RDMA 连接的完整生命周期与 I/O：
+// - 资源：QP/CQ/完成通道与共享内存（发送/接收缓冲）、每设备并发信号量 `rdmaSem_`
+// - 协议：提供基于消息（SEND/RECV）与基于内存的 RDMA（READ/WRITE）两类操作
+// - 事件：注册到 `EventLoop`，通过 `poll/cqPoll/wcSuccess` 驱动完成回调与状态转换
+// - 关系：由 `IBConnectService` 负责建连参数与握手；`IBSocketManager::Drainer` 负责优雅关闭与定时清理
 class IBSocket : public Socket, folly::MoveOnly {
  public:
+  // Config 汇总 QP/队列参数与缓冲大小、统计开关等：
+  // - 连接：`pkey_index/sl/traffic_class/start_psn` 等；重传与 RNR 阈值
+  // - RDMA：`max_sge/max_rdma_wr/max_rdma_wr_per_post/max_rd_atomic` 控制批量与并发
+  // - 缓冲：`buf_size/send_buf_cnt` 以及 ACK/信号批量大小；事件 ACK 批量
+  // - 诊断：是否记录按 peer 的字节与时延
   struct Config : public ConfigBase<Config> {
     // for recorder
     CONFIG_HOT_UPDATED_ITEM(record_bytes_per_peer, false);
@@ -152,6 +162,10 @@ class IBSocket : public Socket, folly::MoveOnly {
   bool checkConnectFinished() const;
 
   /** RDMA operations. */
+  // RDMA 读/写：
+  // - `rdmaRead/rdmaWrite` 将远端缓冲（`RDMARemoteBuf`）与本端缓冲（`RDMABuf` 或 span）拼装为批次并提交
+  // - 内部通过 `rdmaBatch()` 将多个请求分批（受限于 `max_sge/max_rdma_wr_per_post`）构造 WR 链并 `ibv_post_send`
+  // - 完成回调由 CQ 轮询触发（参见 `wcSuccess/onRDMAFinished`），并唤醒等待的 `RDMAPostCtx::baton`
   CoTryTask<void> rdmaRead(const RDMARemoteBuf &remoteBuf, RDMABuf &localBuf) {
     co_return co_await rdmaRead(remoteBuf, std::span(&localBuf, 1));
   }
@@ -167,6 +181,9 @@ class IBSocket : public Socket, folly::MoveOnly {
   }
 
  private:
+  // RDMAReq 描述一次 RDMA 读/写的远端地址与本地 SGE 切片位置：
+  // - `raddr/rkey`：远端虚拟地址与 rkey（对应设备）
+  // - `localBufFirst/localBufCnt`：在批次累积的本地缓冲区列表中的起始与数量
   struct RDMAReq {
     uint64_t raddr;
     uint32_t rkey;
@@ -183,8 +200,8 @@ class IBSocket : public Socket, folly::MoveOnly {
   };
 
  public:
-  class RDMAReqBatch {
-   public:
+ class RDMAReqBatch {
+  public:
     RDMAReqBatch()
         : RDMAReqBatch(nullptr, ibv_wr_opcode(-1)) {}
     RDMAReqBatch(IBSocket *socket, ibv_wr_opcode opcode)
@@ -193,6 +210,9 @@ class IBSocket : public Socket, folly::MoveOnly {
           reqs_(),
           localBufs_() {}
 
+    // 增加一个或多个本地缓冲到批次：
+    // - 校验：本地缓冲有效、长度不超过远端缓冲与端口 `max_msg_sz`；rkey 与设备匹配
+    // - 切片：当 `localBufs` 超过 `max_sge` 时按 SGE 上限拆分；远端地址随累计长度 `advance`
     Result<Void> add(const RDMARemoteBuf &remoteBuf, RDMABuf localBuf);
     Result<Void> add(RDMARemoteBuf remoteBuf, std::span<RDMABuf> localBufs);
 
@@ -209,9 +229,8 @@ class IBSocket : public Socket, folly::MoveOnly {
     }
 
     ibv_wr_opcode opcode() const { return opcode_; }
-    CoTryTask<void> post() {
-      co_return co_await socket_->rdmaBatch(opcode_, reqs_, localBufs_, waitLatency_, transferLatency_);
-    }
+    // 提交批次：封装为 `RDMAPostCtx`，受 `rdmaSem_` 限流；CQ 完成后更新 `transferLatency_`
+    CoTryTask<void> post() { co_return co_await socket_->rdmaBatch(opcode_, reqs_, localBufs_, waitLatency_, transferLatency_); }
 
     std::chrono::nanoseconds waitLatency() const { return waitLatency_; };
     std::chrono::nanoseconds transferLatency() const { return transferLatency_; };
@@ -233,6 +252,8 @@ class IBSocket : public Socket, folly::MoveOnly {
  private:
   static constexpr size_t kRDMAPostBatch = 8;
 
+  // State 描述连接状态机：
+  // - INIT→CONNECTING→ACCEPTED→READY 为正常握手流程；CLOSE/ERROR 表示已关闭或出错
   enum class State {
     INIT,
     CONNECTING,
@@ -242,6 +263,10 @@ class IBSocket : public Socket, folly::MoveOnly {
     ERROR,
   };
 
+  // RDMAPostCtx 持有一次批量 RDMA 的上下文：
+  // - `reqs/localBufs`：请求与本地缓冲视图；`bytes` 累计传输字节数
+  // - `sem/waiter`：与设备级并发信号量绑定，实现吞吐与公平控制
+  // - 时延：`postBegin/postEnd` 用于记录排队与网络传输时延
   struct RDMAPostCtx {
     std::optional<std::reference_wrapper<folly::fibers::BatchSemaphore>> sem;
     std::optional<folly::fibers::BatchSemaphore::Waiter> waiter;
@@ -336,6 +361,9 @@ class IBSocket : public Socket, folly::MoveOnly {
     bool operator==(const WRId &other) const { return raw == other.raw; }
   };
 
+  // ImmData 将 ACK/CLOSE 等控制信息编码到 `imm_data`，供对端快速处理：
+  // - `ACK(count)`：批量发送完成的 ack；`CLOSE()`：连接关闭通知
+  // - 使用 8bit type + 24bit payload 编码，保持与 IB 动态匹配
   class ImmData {
     static constexpr size_t kTypeOffset = 24;
     static constexpr uint32_t kValMax = (1 << kTypeOffset) - 1;
@@ -394,6 +422,9 @@ class IBSocket : public Socket, folly::MoveOnly {
     ~BufferMem();
   };
 
+  // Buffers 抽象共享内存中的环形视图：
+  // - `ptr_+mr_`：整块注册内存与其 MR；`bufSize_/bufCnt_`：每页大小与页数
+  // - 子类 `SendBuffers/RecvBuffers` 提供生产/消费队列与当前窗口引用
   class Buffers {
    public:
     void init(uint8_t *ptr, ibv_mr *mr, size_t bufSize, size_t bufCnt) {
@@ -415,6 +446,8 @@ class IBSocket : public Socket, folly::MoveOnly {
     size_t bufCnt_ = 0;
   };
 
+  // SendBuffers 管理待发送的消息缓冲：
+  // - 通过 `push/front/pop` 在环形队列中写入/取出分片，配合 `postSend` 发送
   class SendBuffers : public Buffers {
    public:
     void init(uint8_t *ptr, ibv_mr *mr, size_t bufSize, size_t bufCnt);
@@ -429,6 +462,8 @@ class IBSocket : public Socket, folly::MoveOnly {
     std::pair<size_t, folly::MutableByteRange> front_;
   };
 
+  // RecvBuffers 管理已接收的消息缓冲：
+  // - 通过 `push(idx,len)` 标记收到的数据窗口，消费者 `front/pop` 读取与释放
   class RecvBuffers : public Buffers {
    public:
     void init(uint8_t *ptr, ibv_mr *mr, size_t bufSize, size_t bufCnt);
@@ -475,6 +510,8 @@ class IBSocket : public Socket, folly::MoveOnly {
   int postAck();
 
   friend class IBSocketManager;
+  // Drainer 作为事件处理器：
+  // - 监听套接字 FD，将关闭/清理流程与 `IBSocketManager` 协调（定时器、deadline 集合）
   class Drainer : public EventLoop::EventHandler, public std::enable_shared_from_this<Drainer> {
    public:
     using Ptr = std::shared_ptr<Drainer>;
