@@ -31,16 +31,26 @@ DECLARE_string(cfg);
 namespace hf3fs {
 
 /*
- * ConfigBase class with macro.
- * The supported value types:
- *  - std::string
- *  - int64_t
- *  - double
- *  - bool
- *  - enum
- *  - std::vector of above types
+ * 3FS 配置系统总览
+ *
+ * - 基于 CRTP 的通用配置框架：用户通过继承 ConfigBase<T> 声明配置类型 T。
+ * - 通过一组宏（CONFIG_ITEM/CONFIG_HOT_UPDATED_ITEM/CONFIG_OBJ/CONFIG_SECT 等）在编译期注册
+ *   配置项与子节（section）的成员偏移，形成键 → 成员指针 的映射，用于运行时解析与访问。
+ * - 支持热更新与原子更新：配置可以从 TOML、字符串、文件、命令行覆盖项进行更新；热更新受每个
+ *   项的“是否可热更新”控制；原子更新先克隆校验后提交，避免部分更新导致的中间态。
+ * - 线程安全与低开销读取：原始类型使用原子封装（AtomicValue），复杂类型使用线程本地缓存（TLSStore）
+ *   提供近似无锁读取；所有结构化更新在互斥锁下执行。
+ * - 序列化/反序列化：支持将配置完整或按键转换为 TOML；向量、集合、映射、可选值以及枚举等均有
+ *   明确的序列化规则。
+ * - 校验与回调：每项可绑定检查器（checker）用于值合法性校验；配置完成更新后触发回调守卫（CallbackGuard）。
+ * - 变体类型：通过 CONFIG_VARIANT_TYPE 为同一配置声明多种子节实现，按当前选择的 type 输出与解析。
+ *
+ * 支持的值类型示例：
+ *  - 原始类型：std::string、int64_t、double、bool、枚举
+ *  - 容器类型：std::vector、std::set、std::map 及其元素为上述类型或 IConfig 派生类型
  */
 
+// 声明一个子节（section）对象并注册到当前配置类型的节表中；可选提供初始化器对该子节进行默认设定。
 #define CONFIG_OBJ(name, cls, ...) /* optional parameter: initializer */                                     \
  public:                                                                                                     \
   cls &name() { return name##_; }                                                                            \
@@ -55,6 +65,7 @@ namespace hf3fs {
     return true;                                                                                             \
   }()
 
+// 声明一个固定容量的子节数组，并将每个元素以 "name#<index>" 注册为独立节；可选提供初始化器设置默认长度。
 #define CONFIG_OBJ_ARRAY(name, cls, cap, ...) /* optional parameter: initializer */             \
  public:                                                                                        \
   cls &name(size_t idx) { return name##_[idx]; }                                                \
@@ -88,11 +99,16 @@ namespace hf3fs {
     return length;                                                                              \
   }()
 
+// 使用内联类型方式声明一个子节：T<name> 作为内嵌配置类型，并注册为节。
 #define CONFIG_SECT(name, section)                     \
  protected:                                            \
   struct T##name : public ConfigBase<T##name> section; \
   CONFIG_OBJ(name, T##name)
 
+// 声明一个基础配置项并注册到当前配置类型的项表中：
+// - defaultValue：默认值；支持原始类型、容器、IConfig 派生类型或可选类型
+// - supportHotUpdated：是否允许热更新（true/false）
+// - 可选 checker：用于值合法性校验，返回 true 表示合法
 #define CONFIG_ADD_ITEM(name, defaultValue, supportHotUpdated, ...) /* optional parameter: checker */   \
  private:                                                                                               \
   using T##name = ::hf3fs::config::ValueType<std::decay_t<decltype(defaultValue)>>;                     \
@@ -112,9 +128,11 @@ namespace hf3fs {
     return supportHotUpdated;                                                                           \
   }() __VA_OPT__(, ) __VA_ARGS__)
 
+// CONFIG_ITEM：不支持热更新；CONFIG_HOT_UPDATED_ITEM：支持热更新
 #define CONFIG_ITEM(name, defaultValue, ...) CONFIG_ADD_ITEM(name, defaultValue, false, __VA_ARGS__)
 #define CONFIG_HOT_UPDATED_ITEM(name, defaultValue, ...) CONFIG_ADD_ITEM(name, defaultValue, true, __VA_ARGS__)
 
+// 为变体类型配置声明类型选择键（type），其值需与已注册的节名一致；toToml/toString 输出当前选中节。
 #define CONFIG_VARIANT_TYPE(defaultType)                                        \
   CONFIG_ITEM(type, std::string{defaultType}, [this](const std::string &name) { \
     using Self = std::decay_t<decltype(*this)>;                                 \
@@ -126,6 +144,7 @@ namespace hf3fs {
 
 namespace config {
 
+// IItem 表示一个基础配置项（含值、校验、更新与序列化能力），由宏生成的 Item<T> 实现。
 struct IItem {
   virtual ~IItem() = default;
   virtual Result<Void> validate(const std::string &path) const = 0;
@@ -146,6 +165,15 @@ inline std::string tomlToString(const toml::node &node) {
   return ss.str();
 }
 
+// IConfig 为所有配置类型的抽象接口。
+// 生命周期与能力：
+// - clonePtr/defaultPtr：以指针形式克隆当前配置或创建默认配置
+// - validate/overallValidate：项级逐一校验与整体校验
+// - update：从 TOML/字符串/文件/键值对更新；update(isHotUpdate) 控制是否按热更新规则执行
+// - atomicallyUpdate：克隆 → 试更新 → 成功后提交，避免中间态
+// - toToml/toString：序列化为 TOML/字符串；支持按键输出
+// - find：按 "section.item" 或 "name#idx" 等键定位项
+// - init：集成命令行解析（--config.<key>=<value>）、文件加载（--cfg）与默认校验
 struct IConfig {
   virtual ~IConfig() = default;
 
@@ -258,6 +286,8 @@ class ConfigCallbackGuard {
 };
 
 template <class T>
+// TLSStore：为非原始、不可平凡拷贝的值提供线程本地的只读缓存视图。
+// - 写入通过共享指针整体替换，递增版本号；读取线程使用 ThreadLocal 缓存减少原子加载频率。
 class TLSStore {
  public:
   TLSStore(T &&value)
@@ -309,6 +339,7 @@ template <class T>
 using ValueType = std::conditional_t<std::is_same_v<T, const char *>, std::string, T>;
 
 template <typename T>
+// 将 TOML 节点解析为期望的值类型 T，支持：原始类型、枚举、可从字符串构造的类型、IConfig 派生类型等。
 inline Result<T> tomlNodeToValue(const toml::node &node) {
   return node.visit([&](auto &&el) -> Result<T> {
     using TE = std::decay_t<decltype(el)>;
@@ -361,6 +392,9 @@ inline Result<T> tomlNodeToValue(const toml::node &node) {
 }
 
 template <class T>
+// Item<T>：单个配置项的通用实现。
+// - 支持热更新标记、值检查器（checker）、容器/映射/可选值的专用更新与序列化逻辑。
+// - update(node, isHotUpdate) 会在值不同且允许更新时提交；否则报错或忽略。
 class Item : public IItem {
  public:
   Item(std::string name, T defaultValue, bool supportHotUpdate, std::function<bool(ReturnType<T>)> checker = nullptr)
@@ -579,6 +613,14 @@ inline std::string concat(const std::string &a, const std::string &b) { return a
 using config::ConfigCallbackGuard;
 
 template <class Parent>
+// ConfigBase<Parent>：配置类型的通用基类（CRTP）。
+// 核心机制：
+// - sections_/items_/lengths_ 记录成员偏移，用于运行时按键路由更新/序列化/查找
+// - update(table)：递归处理子节与数组节（name#idx），对未知键报错；完成后触发回调并整体校验
+// - toToml()：输出所有项与节；对变体类型仅输出当前选定节；数组节按长度输出为数组
+// - atomicallyUpdate(...)：克隆副本后试更新，成功再提交到当前对象
+// - validate(...)：逐节逐项调用其校验器；最终执行整体校验
+// - diffWith(...)：计算两份配置的差异项（键、左右值）
 class ConfigBase : public config::IConfig {
  protected:
   ConfigBase() = default;

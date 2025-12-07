@@ -21,6 +21,18 @@
 
 namespace hf3fs::storage::client {
 
+/*
+  StorageClientImpl 工作原理（RPC 实现）：
+  - 与服务端通信：通过 `StorageMessenger` 调用 StorageService 的批量/单次接口。
+  - 路由信息：启动时向管理端获取最新 RoutingInfo，并注册监听以便更新；每次请求都会校验路由版本一致性。
+  - 目标选择：依据 `TargetSelectionOptions` 在复制链上选择目标（读可负载均衡，写/维护通常选择链头）。
+  - 批次与并发：按节点分组形成批次；通过全局与每节点信号量限制并发，支持热更新（HotLoad）。
+  - 更新通道：为写/删除/截断分配 `UpdateChannel`，保证同链上的更新顺序；成功后释放通道。
+  - 重试机制：指数退避，区分永久/暂时/快速重试错误；支持失败目标统计与避让。
+  - 校验：读可选客户端重算校验比对；写端到端携带校验由服务端核对。
+  - 性能指标：记录并发度、批次/请求/操作与字节分布、时延与带宽等，便于观测。
+*/
+
 /* Performance metrics */
 
 static std::unordered_map<StorageClient::MethodType, std::atomic_int64_t> atomic_concurrent_user_calls;
@@ -66,6 +78,12 @@ static monitor::CountRecorder data_payload_bytes_per_user{"storage_client.data_p
 
 using TargetOnChain = std::tuple<TargetId, ChainId, ChainVer>;
 
+/*
+  ClientRequestContext：一次用户调用（可能包含多个操作）的上下文
+  - 保存方法类型、用户信息、调试选项、重试次数与超时；
+  - 记录与上报性能指标（并发用户调用、挂起操作数量、整体时延、带宽等）；
+  - `numFailures` 用于统计某目标在当前调用中的失败次数，辅助路由选择与日志。
+*/
 class ClientRequestContext {
   static constexpr std::string_view kMetricUserTag = "uid";
 
@@ -134,6 +152,10 @@ std::atomic_uint64_t ClientRequestContext::nextUserCallId = 1;
 
 /* Helper functions for status code */
 
+/*
+  错误分类：永久错误
+  - 这类错误不会通过重试自行恢复（如参数非法、校验失败、只读服务等），通常直接终止并释放通道。
+*/
 static bool isPermanentError(status_code_t statusCode) {
   switch (statusCode) {
     case StorageClientCode::kMemoryError:
@@ -152,6 +174,10 @@ static bool isPermanentError(status_code_t statusCode) {
   return false;
 }
 
+/*
+  错误分类：暂时不可达
+  - 通信失败、超时、远端 IO 错误等；重试时可适当增加等待并尝试替代目标。
+*/
 static bool isTemporarilyUnavailable(status_code_t statusCode) {
   switch (statusCode) {
     case StorageClientCode::kCommError:
@@ -163,6 +189,10 @@ static bool isTemporarilyUnavailable(status_code_t statusCode) {
   return false;
 }
 
+/*
+  错误分类：快速重试
+  - 路由版本不一致或读取未提交数据等；通常无需完整等待周期，缩短重试间隔。
+*/
 static bool isFastRetryError(status_code_t statusCode) {
   switch (statusCode) {
     case StorageClientCode::kRoutingVersionMismatch:
@@ -700,6 +730,7 @@ typename hf3fs::storage::BatchReadReq buildBatchRequest(const ClientRequestConte
   bytes_per_request.addSample(requestedBytes, requestTagSet);
   ops_per_request.addSample(ops.size(), requestTagSet);
 
+  // 读请求携带返回校验类型：开启校验则使用客户端配置的 chunk 校验类型，否则为 NONE
   auto checksumType = options.verifyChecksum() ? config.chunk_checksum_type() : ChecksumType::NONE;
   uint32_t featureFlags = buildFeatureFlagsFromOptions(options.debug());
 
@@ -1026,6 +1057,12 @@ std::vector<Op *> createVectorOfPtrsFromOps(std::span<Op> ops) {
   return ptrs;
 }
 
+/*
+  按节点分组形成批次：
+  - 将同一节点的操作合并为批次，考虑最大批次大小与字节上限；
+  - 对带通道的操作优先处理（移至批次前端），以减少等待；
+  - 可选随机打散批次顺序，避免热点聚集。
+*/
 template <typename Op>
 std::vector<std::pair<NodeId, std::vector<Op *>>> groupOpsByNodeId(ClientRequestContext &requestCtx,
                                                                    const std::vector<Op *> &ops,
@@ -1121,6 +1158,11 @@ std::vector<std::pair<NodeId, std::vector<Op *>>> groupOpsByNodeId(ClientRequest
   return batches;
 }
 
+/*
+  处理批次：
+  - 可选择并行或串行遍历批次，串行模式便于控制资源与顺序；
+  - 与每节点/全局信号量配合，限制并发请求数量。
+*/
 template <typename Op, typename Ops = std::vector<Op *>>
 CoTask<void> processBatches(const std::vector<std::pair<NodeId, Ops>> &batches, auto &&func, bool parallel) {
   std::vector<CoTask<bool>> tasks;
@@ -1140,6 +1182,12 @@ CoTask<void> processBatches(const std::vector<std::pair<NodeId, Ops>> &batches, 
   if (parallel) co_await folly::coro::collectAllRange(std::move(tasks));
 }
 
+/*
+  带重试的请求发送：
+  - 指数退避计算请求超时；在一次轮次中发送所有挂起操作，统计失败目标并决定下一轮；
+  - 对永久错误直接结束；暂时错误进入下一轮；快速重试错误缩短等待；
+  - 在重试结束或所有操作完成时释放通道并返回。
+*/
 template <typename Op>
 CoTryTask<void> sendOpsWithRetry(ClientRequestContext &requestCtx,
                                  UpdateChannelAllocator &chanAllocator,
@@ -1245,6 +1293,8 @@ CoTryTask<void> sendOpsWithRetry(ClientRequestContext &requestCtx,
 
     for (const auto &failedTarget : failedTargets) {
       const auto &[targetId, chainId, chainVer] = failedTarget;
+      // 这个 numFailures 可以用来后续挑选 target 的选择代码, 如果失败则统计, 然后不会选择 failed 次数
+      // 比较多的地方.
       requestCtx.numFailures[failedTarget]++;
       XLOGF(INFO,
             "Cannot access storage target {} on {}@{} for {} times during processing of {}/{} ops {}, "
@@ -1299,6 +1349,12 @@ exit:
   co_return Void{};
 }
 
+/*
+  统一的批量请求入口：
+  - 依据最新路由解析节点信息，调用 `StorageMessenger` 上对应 RPC；
+  - 校验返回结果长度、聚合统计字节与块数并上报；
+  - 出错时为每个操作设置错误码，便于后续重试决策。
+*/
 template <typename Op, typename BatchReq, typename BatchRsp, auto Method>
 CoTryTask<BatchRsp> StorageClientImpl::sendBatchRequest(StorageMessenger &messenger,
                                                         ClientRequestContext &requestCtx,
@@ -1409,6 +1465,12 @@ StorageClientImpl::StorageClientImpl(const ClientId &clientId,
 
 StorageClientImpl::~StorageClientImpl() { stop(); }
 
+/*
+  客户端启动：
+  - 初始化并启动网络客户端（主通道与更新通道可独立配置）；
+  - 从管理端获取首个路由信息并注册监听，确保路由随集群变化及时更新；
+  - 初始化并发统计与限流结构。
+*/
 Result<Void> StorageClientImpl::start() {
   XLOGF(INFO, "Starting storage client {}", clientId_);
 
@@ -1464,6 +1526,10 @@ Result<Void> StorageClientImpl::start() {
   return Void{};
 }
 
+/*
+  客户端停止：
+  - 注销路由监听并停止网络客户端；重置状态。
+*/
 void StorageClientImpl::stop() {
   XLOGF(INFO, "Stopping storage client {}", clientId_);
 
@@ -1491,6 +1557,11 @@ void StorageClientImpl::stop() {
   XLOGF(INFO, "Storage client {} stopped", clientId_);
 }
 
+/*
+  路由信息更新：
+  - 比对版本并打印链表与目标变化；对单副本链跳过冗余检查；
+  - 在路由缺失或异常时记录错误，防止基于不完整路由继续访问。
+*/
 void StorageClientImpl::setCurrentRoutingInfo(std::shared_ptr<hf3fs::client::RoutingInfo const> latestRoutingInfo) {
   if (latestRoutingInfo == nullptr || latestRoutingInfo->raw() == nullptr) {
     XLOGF(DFATAL, "Latest (raw) routing info is null");
@@ -1639,6 +1710,11 @@ exit:
   co_return Void{};
 }
 
+/*
+  读链路（单轮不重试）：
+  - 基于 `TargetSelectionOptions` 选择目标（默认负载均衡）；按节点分组形成批次；
+  - 创建批量读请求，支持小包数据内联；若启用校验则客户端重算并比对服务端校验。
+*/
 CoTryTask<void> StorageClientImpl::batchReadWithoutRetry(ClientRequestContext &requestCtx,
                                                          const std::vector<ReadIO *> &readIOs,
                                                          const flat::UserInfo &userInfo,
@@ -1720,6 +1796,7 @@ CoTryTask<void> StorageClientImpl::batchReadWithoutRetry(ClientRequestContext &r
     if (options.verifyChecksum()) {
       for (auto readIO : batchIOs) {
         if (readIO->result.lengthInfo && *readIO->result.lengthInfo > 0) {
+          // Client 端重算 checksum
           auto checksum = ChecksumInfo::create(readIO->result.checksum.type, readIO->data, *readIO->result.lengthInfo);
           if (FAULT_INJECTION_POINT(requestCtx.debugFlags.injectClientError(),
                                     true,
@@ -1796,6 +1873,11 @@ exit:
   co_return Void{};
 }
 
+/*
+  写链路（单轮不重试）：
+  - 通常选择链头作为目标；为每个写 IO 分配更新通道以保证顺序；
+  - 按节点顺序发送写请求（同一批次内串行），小包数据可内联；客户端计算并随请求携带校验。
+*/
 CoTryTask<void> StorageClientImpl::batchWriteWithoutRetry(ClientRequestContext &requestCtx,
                                                           const std::vector<WriteIO *> &writeIOs,
                                                           const flat::UserInfo &userInfo,
@@ -1834,7 +1916,7 @@ CoTryTask<void> StorageClientImpl::batchWriteWithoutRetry(ClientRequestContext &
       co_return false;
     }
 
-    // 申请操作的 Channel, 本质上是一个定序操作.
+    // 申请操作的 Channel, 本质上是一个定序操作, 给写入的 IO 定序
     if (!allocateChannelsForOps(chanAllocator_, batchIOs, false /*reallocate*/)) {
       XLOGF(WARN,
             "Cannot allocate channel ids for {} write IOs, first IO {}",
@@ -1859,6 +1941,11 @@ CoTryTask<void> StorageClientImpl::batchWriteWithoutRetry(ClientRequestContext &
   co_return Void{};
 }
 
+/*
+  单个写请求发送：
+  - 构造链/块键与数据视图（RDMA 子区间或内联），可选计算校验并随请求携带；
+  - 通过更新通道 `channel` 进行定序，服务端返回结果后设置到 IO。
+*/
 CoTryTask<void> StorageClientImpl::sendWriteRequest(ClientRequestContext &requestCtx,
                                                     WriteIO *writeIO,
                                                     const hf3fs::flat::NodeInfo &nodeInfo,
@@ -1877,6 +1964,7 @@ CoTryTask<void> StorageClientImpl::sendWriteRequest(ClientRequestContext &reques
   bytes_per_request.addSample(writeIO->length, requestCtx.requestTagSet);
   ops_per_request.addSample(1, requestCtx.requestTagSet);
 
+  // 写请求端到端校验：客户端在发送前对写入数据计算校验并随请求透传，服务端将据此验证
   if (options.verifyChecksum()) {
     writeIO->checksum = FAULT_INJECTION_POINT(
         requestCtx.debugFlags.injectClientError(),
@@ -1926,6 +2014,11 @@ CoTryTask<void> StorageClientImpl::sendWriteRequest(ClientRequestContext &reques
   co_return Void{};
 }
 
+/*
+  批次内顺序写：
+  - 为同一节点上的一批 IO 顺序发送，遇到首个错误即结束并返回该错误；
+  - 成功的 IO 释放其通道并累计字节/块数以便指标统计。
+*/
 CoTryTask<void> StorageClientImpl::sendWriteRequestsSequentially(
     ClientRequestContext &requestCtx,
     const std::vector<WriteIO *> &writeIOs,

@@ -226,6 +226,7 @@ class StorageClientImpl : public StorageClient {
   hf3fs::client::ICommonMgmtdClient &mgmtdClient_;
   StorageMessenger messenger_;
   StorageMessenger messengerForUpdates_;
+  // 从 MaxConcurrentUpdate 来初始化.
   UpdateChannelAllocator chanAllocator_;
   folly::atomic_shared_ptr<hf3fs::client::RoutingInfo const> currentRoutingInfo_;
 

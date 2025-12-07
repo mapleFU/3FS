@@ -196,6 +196,7 @@ Result<uint32_t> ChunkReplica::update(ChunkStore &store, UpdateJob &job, folly::
     return makeError(StorageCode::kChainVersionMismatch, std::move(msg));
   }
 
+  // 服务端写入前校验：对本地 RDMA 缓冲重新计算校验，与客户端随请求透传的校验比对
   if (writeIO.checksum.type != ChecksumType::NONE && writeIO.length != 0) {
     auto checksum = ChecksumInfo::create(writeIO.checksum.type, state.data, writeIO.length);
     if (checksum != writeIO.checksum) {
@@ -326,6 +327,7 @@ Result<uint32_t> ChunkReplica::update(ChunkStore &store, UpdateJob &job, folly::
   return writeResult;
 }
 
+// 更新元数据中的整块校验：根据写入类型与范围选择最优策略，尽量避免整块重算
 Result<Void> ChunkReplica::updateChecksum(ChunkInfo &chunkInfo,
                                           UpdateIO writeIO,
                                           uint32_t chunkSizeBeforeWrite,
@@ -335,18 +337,22 @@ Result<Void> ChunkReplica::updateChecksum(ChunkInfo &chunkInfo,
   auto chunkChecksum = meta.checksum();
   bool combineChecksum = chunkSizeBeforeWrite > 0 && isAppendWrite;
 
+  // 截断/扩展：规范化为偏移末尾、长度 0 的写，以更新长度与校验
   if (writeIO.isTruncate() || writeIO.isExtend()) {
     writeIO.checksum = ChecksumInfo::create(meta.checksumType, (const uint8_t *)nullptr, 0);
     writeIO.offset = meta.size;
     writeIO.length = 0;
   }
 
+  // 空类型或空块：校验值归零
   if (writeIO.checksum.type == ChecksumType::NONE || meta.size == 0) {
     meta.checksumValue = 0;
     storageUpdateChecksumNone.addSample(1);
+  // 覆盖完整 chunk：直接复用写请求的校验
   } else if (writeIO.offset == 0 && writeIO.length == meta.size) {
     meta.checksumValue = writeIO.checksum.value;
     storageUpdateChecksumReuse.addSample(1);
+  // 末尾追加且类型一致：通过 combine 快速拼接已有校验与新增数据校验
   } else if (writeIO.checksum.type == chunkChecksum.type && combineChecksum) {
     // combine the chunk checksum and write io checksum if this write appends to existing chunk
     auto combinResult = chunkChecksum.combine(writeIO.checksum, writeIO.length);
@@ -364,6 +370,7 @@ Result<Void> ChunkReplica::updateChecksum(ChunkInfo &chunkInfo,
     meta.checksumValue = chunkChecksum.value;
     storageUpdateChecksumCombine.addSample(1);
   } else {
+    // 非追加且非完整覆盖：分别读取前缀/后缀并计算校验，再与写入段校验依次组合
     // read the prefix of chunk and compute its checksum
     auto prefixChecksum = chunkInfo.view.checksum(writeIO.checksum.type, writeIO.offset, 0, meta);
 

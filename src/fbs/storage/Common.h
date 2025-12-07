@@ -63,6 +63,7 @@ enum class ChunkState : uint8_t {
   CLEAN = 2,
 };
 
+/// 总感觉 None 和 CRC32C 就够了
 enum class ChecksumType : uint8_t {
   NONE = 0,
   CRC32C = 1,
@@ -111,6 +112,12 @@ class ChunkId {
 };
 static_assert(serde::Serializable<ChunkId>);
 
+/// ChecksumInfo 表示分段可组合的校验信息：
+/// - 支持 CRC32C/CRC32/NONE 三种类型；NONE 表示不校验
+/// - 提供流式 `create(iter)` 与内存 `create(buffer)` 计算，按 `kChunkSize` 切块迭代
+/// - 通过 `combine` 将已有校验与新增数据长度合并（适用于追加写），避免整块重算
+///
+/// 注意一下这里只有读整个 Chunk 的时候，才会有重算验证的请求，正常情况不假设 corrupt.
 struct ChecksumInfo {
   SERDE_STRUCT_FIELD(type, ChecksumType::NONE);
   SERDE_STRUCT_FIELD(value, uint32_t{});
@@ -144,6 +151,7 @@ struct ChecksumInfo {
     size_t length_;
   };
 
+  /// 按迭代器流式计算校验，支持大数据分块读取；`startingChecksum` 允许在已有校验基础上继续计算
   static ChecksumInfo create(ChecksumType type, DataIterator *iter, size_t length, uint32_t startingChecksum = ~0U) {
     ChecksumInfo checksum = {type, startingChecksum};
     size_t iterBytes = 0;
@@ -172,11 +180,13 @@ struct ChecksumInfo {
     return checksum;
   }
 
+  /// 对内存缓冲区计算校验的便捷方法
   static ChecksumInfo create(ChecksumType type, const uint8_t *buffer, size_t length, uint32_t startingChecksum = ~0U) {
     MemoryDataIterator iter(buffer, length);
     return create(type, &iter, length, startingChecksum);
   }
 
+  /// 组合已有校验与新增数据长度（仅当类型一致），常用于“尾部追加”的快速更新全量校验
   Result<Void> combine(const ChecksumInfo &o, size_t length) {
     if (type != ChecksumType::NONE && type != o.type) {
       return makeError(StorageCode::kChecksumMismatch,
@@ -257,6 +267,7 @@ struct VersionedChainId {
 };
 static_assert(serde::Serializable<VersionedChainId>);
 
+/// RDMA 读写 Chain 内容的 "GlobalKey"
 struct GlobalKey {
   SERDE_STRUCT_FIELD(vChainId, VersionedChainId{});
   SERDE_STRUCT_FIELD(chunkId, ChunkId{});

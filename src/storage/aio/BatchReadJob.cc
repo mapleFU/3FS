@@ -24,7 +24,10 @@ AioReadJob::AioReadJob(const ReadIO &readIO, IOResult &result, BatchReadJob &bat
 void AioReadJob::setResult(Result<uint32_t> lengthInfo) {
   if (lengthInfo) {
     auto checksumType = batch_.checksumType();
-
+    // 读路径的返回校验策略：
+    // - NONE：不返回校验
+    // - 完整 chunk 且类型匹配：复用元数据中的整块校验，避免重算
+    // - 其他情况：对本次读取的数据段重算并返回
     if (checksumType == ChecksumType::NONE) {
       result_.checksum = {ChecksumType::NONE, 0U};  // do not return checksum
     } else if (checksumType == state_.chunkChecksum.type && readIO_.offset == 0 && *lengthInfo == state_.chunkLen) {
@@ -42,6 +45,7 @@ void AioReadJob::setResult(Result<uint32_t> lengthInfo) {
       lengthInfo = makeError(std::move(result.error()));
     }
 
+    // 在需要强一致验证的场景（如链同步）可要求完整读取后强制重算校验并与元数据比对
     if (batch_.recalculateChecksum() && readIO_.offset == 0 && *lengthInfo == state_.chunkLen) {
       auto realChecksum = ChecksumInfo::create(state_.chunkChecksum.type, state_.localbuf.ptr(), *lengthInfo);
       if (UNLIKELY(realChecksum != state_.chunkChecksum)) {

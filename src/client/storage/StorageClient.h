@@ -16,8 +16,32 @@
 
 namespace hf3fs::storage::client {
 
-/* Dynamic routing info for accessing a storage target */
+/*
+  3FS StorageClient 层概览（客户端侧存储访问入口）：
+  - 作用：负责把用户的读写/维护类操作封装为统一的请求，依据路由信息选择目标存储节点，做并发与重试控制，
+          并通过网络消息通道与 StorageService 交互。
+  - 关键组成：
+    * RoutingTarget：面向复制链（Chain）的当前可用目标与通道信息，支持链版本与路由版本一致性检查。
+    * ReadIO/WriteIO 及维护操作（Query/Remove/Truncate）：封装一次操作的参数、结果与上下文。
+    * Options/Config：读写选项（校验、目标选择、重试）与客户端全局配置（并发流控、网络客户端）。
+    * UpdateChannelAllocator：为需要顺序性的更新类操作分配有序通道（channel），保证同一链上更新的先后关系。
+  - 读链路：
+    用户构造 ReadIO → StorageClientImpl 选择目标（可负载均衡）并按节点分组 → 并发批量发送 → 可选内联回传数据 →
+    可选客户端校验 → 记录指标与返回结果。
+  - 写链路：
+    用户构造 WriteIO → 选择链头目标（或指定策略）→ 为每个 IO 分配更新通道 → 按节点顺序发送（保证有序）→
+    服务端校验并落盘 → 成功后释放通道 → 记录指标与返回结果。
+  - 维护链路（查询/删除/截断）：流程与写类似，通常选择链头，必要时也使用更新通道以保证操作序。
+*/
 
+/*
+  动态路由目标信息：
+  - 表示一次操作要访问的复制链上的某个存储目标以及与之关联的有序通道。
+  - `chainId/chainVer`：复制链及其版本，用于确保与最新路由一致。
+  - `routingInfoVer`：路由表版本；客户端在发送前会比对，防止基于过期路由进行访问。
+  - `targetInfo`：目标存储节点的轻量信息（目标/节点标识）。
+  - `channel`：更新类操作的通道号，用来在服务端进行跨请求的顺序约束；读操作一般不需要。
+*/
 class RoutingTarget {
  public:
   RoutingTarget(ChainId chainId)
@@ -41,8 +65,11 @@ class RoutingTarget {
   UpdateChannel channel;
 };
 
-/* Read/write IOs */
-
+/*
+  IOBuffer：注册到 RDMA 的用户缓冲区视图
+  - 通过 `registerIOBuffer` 生成，内部持有 RDMA 缓冲描述。
+  - 支持计算子区间 `subrange`，为零拷贝发送/接收提供基础。
+*/
 class IOBuffer : public folly::MoveOnly {
  public:
   uint8_t *data() const { return const_cast<uint8_t *>(rdmabuf.ptr()); }
@@ -69,6 +96,13 @@ class IOBuffer : public folly::MoveOnly {
   friend class StorageClientInMem;
 };
 
+/*
+  IOBase：一次读/写操作的通用参数与结果容器
+  - `chunkId/offset/length/chunkSize`：块标识与读写范围；写操作会校验范围合法性。
+  - `data/buffer`：用户数据指针与已注册的 RDMA 缓冲区；需保证在同批请求中不重叠（可配置关闭）。
+  - `routingTarget`：目标链与通道信息，由实现层结合路由选择。
+  - `result`：服务端返回的长度/状态与校验信息；`status()`/`statusCode()` 提供统一错误码访问。
+*/
 class IOBase : public folly::MoveOnly {
  private:
   IOBase(ChainId chainId,
@@ -113,6 +147,10 @@ class IOBase : public folly::MoveOnly {
   friend class WriteIO;
 };
 
+/*
+  ReadIO：一次读操作
+  - `splittedIOs`：当单次读取超过阈值时，客户端会拆分为多个子读请求并在合并结果时保持一致性。
+*/
 class ReadIO : public IOBase {
  private:
   ReadIO(ChainId chainId,
@@ -136,6 +174,11 @@ class ReadIO : public IOBase {
   std::vector<ReadIO> splittedIOs;
 };
 
+/*
+  WriteIO：一次写操作
+  - `requestId`：客户端侧请求编号，用于日志与去重校验。
+  - `checksum`：可选端到端校验（由客户端计算并透传到服务端核对）。
+*/
 class WriteIO : public IOBase {
  private:
   WriteIO(RequestId requestId,
@@ -166,8 +209,13 @@ class WriteIO : public IOBase {
   ChecksumInfo checksum;
 };
 
-/* Read/write options */
-
+/*
+  读写选项与调试注入：
+  - DebugOptions：支持绕过磁盘 IO/网络发送、故障注入（客户端/服务端）等，仅在开发或测试模式使用。
+  - RetryOptions：覆盖客户端重试策略的局部参数（初始/最大等待、总重试时长、是否重试永久错误）。
+  - ReadOptions：是否启用校验、是否允许读取未提交数据（如链复制未完全成功时）。
+  - WriteOptions：是否启用端到端校验；目标选择仅用于测试。
+*/
 class DebugOptions : public hf3fs::ConfigBase<DebugOptions> {
   CONFIG_HOT_UPDATED_ITEM(bypass_disk_io, false);
   CONFIG_HOT_UPDATED_ITEM(bypass_rdma_xmit, false);
@@ -237,8 +285,9 @@ class IoOptions : public ConfigBase<IoOptions> {
   CONFIG_OBJ(write, WriteOptions);
 };
 
-/* queryLastChunk */
-
+/*
+  QueryLastChunkOp：查询区间内按字典序最大 ChunkId 的块，同时统计区间内块数与总长度。
+*/
 class QueryLastChunkOp : public folly::MoveOnly {
  private:
   QueryLastChunkOp(ChainId chainId, ChunkIdRange range, void *userCtx)
@@ -269,8 +318,9 @@ class QueryLastChunkOp : public folly::MoveOnly {
   friend class StorageClientInMem;
 };
 
-/* removeChunks */
-
+/*
+  RemoveChunksOp：删除给定区间的块；由于自动重试，统计的删除数可能小于实际执行的删除数。
+*/
 class RemoveChunksOp : public folly::MoveOnly {
  private:
   RemoveChunksOp(RequestId requestId, ChainId chainId, ChunkIdRange range, void *userCtx)
@@ -300,8 +350,10 @@ class RemoveChunksOp : public folly::MoveOnly {
   friend class StorageClientInMem;
 };
 
-/* truncateChunks */
-
+/*
+  TruncateChunkOp：将块截断/扩展到指定长度；不存在则按 `chunkSize` 创建。
+  - `onlyExtendChunk=true` 时只扩展，不缩短；结果中的 `lengthInfo` 返回最终长度以便端侧核对。
+*/
 class TruncateChunkOp : public folly::MoveOnly {
  private:
   TruncateChunkOp(RequestId requestId,
@@ -343,8 +395,16 @@ class TruncateChunkOp : public folly::MoveOnly {
   friend class StorageClientInMem;
 };
 
-/* Storage client */
-
+/*
+  StorageClient：3FS 客户端存储入口抽象
+  - ImplementationType：具体实现（RPC 与 InMem）。
+  - MethodType：统计与调度使用的操作类型枚举。
+  - RetryConfig：全局重试策略（初始/最大等待、总重试时长、失败阈值触发目标切换）。
+  - OperationConcurrency/HotLoadOperationConcurrency：并发与批量大小控制；HotLoad 版本支持动态热更新。
+  - TrafficControlConfig：各操作类型的并发与批量限制；`max_concurrent_updates()` 估算更新类操作需要的通道容量。
+  - Config：网络客户端与更新客户端配置、重试策略、流控、校验类型、缓冲区重叠检查、内联阈值等。
+  - 接口：创建 IO/Op、批量与单次读写、查询/删除/截断、目标管理与空间查询、缓冲注册等。
+*/
 class StorageClient : public folly::MoveOnly {
  public:
   enum class ImplementationType {

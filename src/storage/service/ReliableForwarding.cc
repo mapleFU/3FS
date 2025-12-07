@@ -155,6 +155,7 @@ CoTask<IOResult> ReliableForwarding::doForward(const UpdateReq &req,
     updateReq.options.commitChainVer = target.vChainId.chainVer;
   }
 
+  // 同步场景：若后继处于 SYNCING 且写入未覆盖整块，为确保一致性需先在本地读取整块并以其数据/校验进行前向
   bool readForSyncing = req.payload.isWriteTruncateExtend() && isSyncing &&
                         (req.options.isSyncing || req.payload.length != req.payload.chunkSize);
   if (readForSyncing) {
@@ -189,7 +190,7 @@ CoTask<IOResult> ReliableForwarding::doForward(const UpdateReq &req,
     co_await batch.complete();
     CO_RETURN_ON_ERROR(readResult.lengthInfo);  // OK.
 
-    // clear the inline data if the update is built from full chunk read
+    // 当更新由完整读取构建时，若之前设置了内联数据需清理，避免与重新构建的数据冲突
     if (BITFLAGS_CONTAIN(updateReq.featureFlags, FeatureFlags::SEND_DATA_INLINE)) {
       BITFLAGS_CLEAR(updateReq.featureFlags, FeatureFlags::SEND_DATA_INLINE);
       updateReq.payload.inlinebuf.data.clear();
@@ -206,6 +207,7 @@ CoTask<IOResult> ReliableForwarding::doForward(const UpdateReq &req,
     updateReq.payload.checksum = batch.front().state().chunkChecksum;
     updateReq.payload.updateType = UpdateType::WRITE;
 
+    // 小数据在前向时可使用内联以减少 RDMA 传输
     if (length <= config_.max_inline_forward_bytes()) {
       updateReq.payload.inlinebuf.data.assign(readBuf.ptr(), readBuf.ptr() + length);
       BITFLAGS_SET(updateReq.featureFlags, hf3fs::storage::FeatureFlags::SEND_DATA_INLINE);
@@ -234,6 +236,7 @@ CoTask<IOResult> ReliableForwarding::doForward(const UpdateReq &req,
     XLOGF(ERR, "forward timeout, req {}, result {}", updateReq, updateResult);
     co_return makeError(std::move(updateResult.error()));
   }
+  // 前向成功后，比较后继生成的校验与本地更新结果的校验，不一致则报告校验错误
   if (LIKELY(bool(updateResult->result.lengthInfo))) {
     if (target.vChainId.chainVer < updateResult->result.commitChainVer) {
       auto msg = fmt::format("chain version local < remote, req {} local {} remote {}",

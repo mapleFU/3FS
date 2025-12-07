@@ -143,8 +143,11 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
   // - AIO 阶段：通过 `aioReadWorker` 将磁盘数据读入 `state.localbuf`
   // - 回传阶段：若开启 RDMA，使用 `ctx.writeTransmission()` 批量 RDMA WRITE 写回客户端远端缓冲
   auto buffer = components_.rdmabufPool.get();
+
+  // 先去分配 memory, 读取塞到这里, 然后
   for (AioReadJobIterator it(&batch); it; it++) {
     auto &job = *it;
+    // 去 allocate RDMA 用到的内存, 按照指定的 alignmenet
     auto allocateResult = buffer.tryAllocate(job.alignedLength());
     if (UNLIKELY(!allocateResult)) {
       allocateResult = co_await buffer.allocate(job.alignedLength());
@@ -169,7 +172,7 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
     auto recordGuard = storageAioEnqueueRecorder.record();
     auto splitSize = config_.batch_read_job_split_size();
     for (uint32_t start = 0; start < batchSize; start += splitSize) {
-      // Enqueue 到 aioReadWorker 中, 以 batchSize 为单元来给
+      // Enqueue 到 aioReadWorker 中, 以 batchSize 为单元来做读取的 io batch 读取
       //
       // TODO(xuwei.fu): 这个 batchSize 影响什么了
       co_await components_.aioReadWorker.enqueue(AioReadJobIterator(&batch, start, splitSize));
@@ -225,6 +228,7 @@ CoTryTask<BatchReadRsp> StorageOperator::batchRead(ServiceRequestContext &reques
 
     auto waitPostRecordGuard = storageWaitPostRecorder.record(ibdevTagSet);
     // 提交 RDMA WRITE 批次，CQ 完成后唤醒；失败则将对应 job 标记错误
+    // 因为 kv read 实际上是 write 远端内存.
     auto postResult = FAULT_INJECTION_POINT(requestCtx.debugFlags.injectServerError(),
                                             makeError(RPCCode::kRDMAPostFailed),
                                             (co_await writeBatch.post()));

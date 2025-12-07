@@ -86,8 +86,9 @@ class AioReadJob {
     SERDE_STRUCT_FIELD(chunkLen, uint32_t{});
     SERDE_STRUCT_FIELD(bufferIndex, uint32_t{});
     SERDE_STRUCT_FIELD(fdIndex, std::optional<uint32_t>{});
-    SERDE_STRUCT_FIELD(chunkChecksum, ChecksumInfo{});
-    SERDE_STRUCT_FIELD(readUncommitted, false);
+    // 根据 chunkChecksum 来标识是否整个 Chunk 
+    SERDE_STRUCT_FIELD(chunkChecksum, ChecksumInfo{}); // 元数据中的整块校验（便于完整读取复用或比对）
+    SERDE_STRUCT_FIELD(readUncommitted, false); // 是否允许未提交版本的读取（影响版本一致性检查）
   } state_;
   static_assert(serde::Serializable<State>);
   RelativeTime startTime_{};
@@ -95,6 +96,7 @@ class AioReadJob {
 
 class BatchReadJob {
  public:
+  // 根据请求的 `checksumType` 返回校验：NONE 不返回；完整读取且类型匹配复用整块校验；否则对读取段重算
   BatchReadJob(std::span<const ReadIO> readIOs, std::span<IOResult> results, ChecksumType checksumType);
   BatchReadJob(const ReadIO &readIO, StorageTarget *target, IOResult &result, ChecksumType checksumType)
       : BatchReadJob(std::span(&readIO, 1), std::span(&result, 1), checksumType) {

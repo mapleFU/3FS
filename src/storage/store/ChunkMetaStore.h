@@ -180,6 +180,9 @@ class ChunkMetaStore {
   const Config &config_;
   ChunkFileStore &fileStore_;
 
+  /// Metadata 存放在一个 RocksDB KV 上.
+  ///
+  /// 这里空间管理似乎还是依赖文件, 没有做统一的 buffer management 机制.
   std::unique_ptr<kv::KVStore> kv_;
   std::string sentinel_;
   std::string kvName_;

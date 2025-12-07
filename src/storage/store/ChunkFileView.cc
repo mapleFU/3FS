@@ -89,6 +89,7 @@ Result<uint32_t> ChunkFileView::write(const uint8_t *buf, size_t size, size_t of
   return w;
 }
 
+// 读取文件数据并按块迭代计算校验；当对齐满足时优先使用 Direct IO 以提升吞吐
 Result<ChecksumInfo> ChunkFileView::checksum(ChecksumType type, size_t size, size_t offset, const ChunkMetadata &meta) {
   if (UNLIKELY(size + offset > meta.innerFileId.chunkSize)) {
     auto msg = fmt::format("chunk write exceed chunk size, meta {}, size {}, offset {}", meta, size, offset);
@@ -103,6 +104,7 @@ Result<ChecksumInfo> ChunkFileView::checksum(ChecksumType type, size_t size, siz
   return checksum;
 }
 
+// 逐次读取最多 kChunkSize 大小的数据返回给校验器；对齐时走 Direct IO
 std::pair<const uint8_t *, size_t> ChunkDataIterator::next() {
   if (length_ == 0) return {nullptr, 0};
 
